@@ -10,14 +10,16 @@ import (
 )
 
 type EventStore struct {
-	opt badger.Options
-	db  *badger.DB
+	opt  badger.Options
+	db   *badger.DB
+	keys []int64 // cache for keys in store
 }
 
 func NewEventStore(dbpath string) *EventStore {
 	es := new(EventStore)
 	es.opt = badger.DefaultOptions(dbpath)
 	es.opt.Logger = nil
+	es.keys = make([]int64, 0)
 
 	return es
 }
@@ -37,11 +39,16 @@ func (es *EventStore) Close() error {
 }
 
 func (es *EventStore) Get(fn func(val []byte) error) error {
+	key := es.getKey()
+	if key == nil {
+		return nil
+	}
+
 	txn := es.db.NewTransaction(true)
 	defer txn.Discard()
 
-	if key, err := es.get(txn, fn); err != nil {
-		return fmt.Errorf("value: %v", err)
+	if key, err := es.get(key, txn, fn); err != nil {
+		return err
 	} else {
 		txn.Delete(key)
 		txn.Commit()
@@ -51,38 +58,10 @@ func (es *EventStore) Get(fn func(val []byte) error) error {
 }
 
 func (es *EventStore) get(
+	key []byte,
 	txn *badger.Txn,
 	fn func(val []byte) error,
 ) ([]byte, error) {
-
-	var keys []int64
-	es.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchSize = 10
-		iter := txn.NewIterator(opts)
-		defer iter.Close()
-
-		for iter.Rewind(); iter.Valid(); iter.Next() {
-			item := iter.Item()
-			key := int64(binary.LittleEndian.Uint64(item.Key()))
-			keys = append(keys, key)
-		}
-
-		return nil
-	})
-
-	if len(keys) == 0 {
-		return nil, nil
-	}
-
-	if len(keys) > 2 {
-		sort.Slice(keys, func(i, j int) bool {
-			return keys[i] < keys[j]
-		})
-	}
-
-	key := make([]byte, 8)
-	binary.LittleEndian.PutUint64(key, uint64(keys[0]))
 	if item, err := txn.Get(key); err != nil {
 		return key, fmt.Errorf("get: %v", err)
 	} else {
@@ -103,4 +82,42 @@ func (es *EventStore) Put(event []byte) error {
 	})
 
 	return err
+}
+
+func (es *EventStore) scanKeys() {
+	es.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchSize = 10
+		iter := txn.NewIterator(opts)
+		defer iter.Close()
+
+		for iter.Rewind(); iter.Valid(); iter.Next() {
+			item := iter.Item()
+			key := int64(binary.LittleEndian.Uint64(item.Key()))
+			es.keys = append(es.keys, key)
+		}
+
+		return nil
+	})
+
+	if len(es.keys) > 2 {
+		sort.Slice(es.keys, func(i, j int) bool {
+			return es.keys[i] < es.keys[j]
+		})
+	}
+}
+
+func (es *EventStore) getKey() []byte {
+	if len(es.keys) == 0 {
+		es.scanKeys()
+	}
+	if len(es.keys) == 0 {
+		return nil
+	}
+
+	key := make([]byte, 8)
+	binary.LittleEndian.PutUint64(key, uint64(es.keys[0]))
+	es.keys = es.keys[1:]
+
+	return key
 }
