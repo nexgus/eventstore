@@ -121,3 +121,11 @@ func (es *EventStore) getKey() []byte {
 
 	return key
 }
+
+func (es *EventStore) GetDB() *badger.DB {
+	return es.db
+}
+
+func (es *EventStore) RunGC(discardRatio float64) error {
+	return es.db.RunValueLogGC(discardRatio)
+}
